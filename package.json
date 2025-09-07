@@ -1,0 +1,78 @@
+{
+  "name": "FastGitFileHistory",
+  "displayName": "FastGitFileHistory",
+  "description": "Quickly view a file's Git commit history & diffs from the Explorer or Editor context menu.",
+  "version": "1.0.0",
+  "publisher": "kirby561",
+  "repository": "https://github.com/kirby561/FastGitFileHistory",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Source Control"
+  ],
+  "main": "./out/extension.js",
+  "icon": "icon.png",
+  "contributes": {
+    "commands": [
+      {
+        "command": "FastGitFileHistory.viewHistory",
+        "title": "View File Git History",
+        "category": "FastGitFileHistory"
+      },
+      {
+        "command": "FastGitFileHistory.openCommitFiles",
+        "title": "Show Changed Files in Commit",
+        "category": "FastGitFileHistory"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "FastGitFileHistory.viewHistory",
+          "when": "resourceExtname != '' && !explorerResourceIsFolder",
+          "group": "navigation@99"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "FastGitFileHistory.viewHistory",
+          "when": "resourceLangId != ''",
+          "group": "navigation@99"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "FastGitFileHistory.viewHistory",
+          "when": "resourceFilename =~ /.+/",
+          "group": "navigation@99"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "FastGitFileHistory",
+      "properties": {
+        "FastGitFileHistory.gitPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the git executable to use. Leave empty to use the first git found in %PATH%."
+        }
+      }
+    }
+  },
+  "activationEvents": [
+    "onCommand:FastGitFileHistory.viewHistory",
+    "onCommand:FastGitFileHistory.openCommitFiles",
+    "onFileSystem:FILE"
+  ],
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.60.0",
+    "typescript": "^4.0.0",
+    "vscode": "^1.1.37"
+  },
+  "license": "MIT"
+}
