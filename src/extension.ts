@@ -88,7 +88,7 @@ async function findGitRepoRoot(filePath: string): Promise<string | null> {
 async function getFileCommits(filePath: string, repoPath: string) {
     const gitPath = vscode.workspace.getConfiguration('fastGitFileHistory').get<string>('gitPath') || 'git';
     try {
-        const relativePath = path.relative(repoPath, filePath);
+        const relativePath = path.relative(repoPath, filePath).replace(/\\/g, '/');
         const { stdout } = await execFileAsync(gitPath, ['log', '--pretty=format:%H|%ad|%s', '--date=short', '--', relativePath], { cwd: repoPath });
         const commits = stdout.split('\n').filter(Boolean).map(line => {
             const [hash, date, ...rest] = line.split('|');
@@ -115,7 +115,7 @@ async function getCommitFiles(commitHash: string, repoPath: string) {
 
 async function getFullFileDiffHtml(filePath: string, commit: string, repoPath: string) {
     const gitPath = vscode.workspace.getConfiguration('fastGitFileHistory').get<string>('gitPath') || 'git';
-    const relativePath = path.relative(repoPath, filePath);
+    const relativePath = path.relative(repoPath, filePath).replace(/\\/g, '/');
 
     let oldContent = '';
     let newContent = '';
