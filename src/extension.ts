@@ -111,7 +111,7 @@ async function getCommitFiles(commitHash: string, repoPath: string) {
     }
 }
 
-// ---------------- Full File + Inline Diff ----------------
+// ---------------- Full File + Inline Diff with Correct Highlighting ----------------
 
 async function getFullFileDiffHtml(filePath: string, commit: string, repoPath: string) {
     const gitPath = vscode.workspace.getConfiguration('fastGitFileHistory').get<string>('gitPath') || 'git';
@@ -140,7 +140,6 @@ async function getFullFileDiffHtml(filePath: string, commit: string, repoPath: s
         return '// Unable to load file/diff';
     }
 
-    // Compute inline diff line by line
     const oldLines = oldContent.split('\n');
     const newLines = newContent.split('\n');
     const maxLines = Math.max(oldLines.length, newLines.length);
@@ -215,12 +214,9 @@ commitEls.forEach(c=>{
 window.addEventListener('message', e=>{
     const msg = e.data;
     if(msg.command==='updateDiff'){
-        const codeEl = document.createElement('pre');
-        codeEl.innerHTML = '<code class="hljs '+msg.language+'">'+msg.diff+'</code>';
         const diffDiv = document.getElementById('diff');
-        diffDiv.innerHTML='';
-        diffDiv.appendChild(codeEl);
-        hljs.highlightElement(codeEl.querySelector('code'));
+        diffDiv.innerHTML = '<pre><code class="hljs ${languageClass}">'+msg.diff+'</code></pre>';
+        diffDiv.querySelectorAll('code').forEach(el=>hljs.highlightElement(el));
     }
 });
 </script>
