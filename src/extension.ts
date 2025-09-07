@@ -221,9 +221,14 @@ class GitFileHistoryPanel {
 
     private getHtml({ commits, diffs, repoPath, relFile }: any): string {
         // Generate HTML with 2 panes and message passing
-        const escapeHtml = (str: string) => str.replace(/[&<>"']/g, (m) => ({
-            '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-        }[m]));
+        const escapeHtml = (str: string | undefined) => (str ?? '').replace(/[&<>"']/g, (m) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[m] || m));  // <- fallback to m itself if no mapping found
+
         function commitEntry(commit: any) {
             let title = '';
             if (commit.special === 'uncommitted') {
