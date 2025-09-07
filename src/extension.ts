@@ -163,6 +163,7 @@ function getFileHistoryHtml(filePath: string, commits: any[], languageClass: str
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/vs2015.min.css">
 <style>
 :root { --bg:#1e1e1e; --left:#151515; --border:#333; --text:#ddd; }
+
 html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--vscode-font-family);}
 .container{display:flex;height:100vh;}
 .left{width:320px;background:var(--left);border-right:1px solid var(--border);overflow:auto;}
@@ -181,8 +182,10 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-famil
 #scrollMarkers {
   pointer-events: none;
   position: absolute;
-  top: 0; right: 0;
-  width: 6px; height: 100%;
+  margin-top: 15px;
+  margin-bottom: 30px;
+  top: 0px; right: 0;
+  width: 6px; height: calc(100% - 45px);
 }
 .marker {
   position: absolute; left:0; width: 100%;
