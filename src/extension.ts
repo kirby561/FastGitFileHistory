@@ -18,13 +18,11 @@ export function activate(context: vscode.ExtensionContext) {
     await openFileHistory(context, fileUri.fsPath);
   }));
 
-  // optional back command if you used it earlier
   context.subscriptions.push(vscode.commands.registerCommand('fastGitFileHistory.back', () => {
     const last = navigationHistory.pop();
     if (last) last();
   }));
 
-  // command used to open commit files view (from webview)
   context.subscriptions.push(vscode.commands.registerCommand('fastGitFileHistory.openCommitFiles', async (commitHash: string, repoPath: string, context?: vscode.ExtensionContext) => {
     const files = await getCommitFiles(commitHash, repoPath);
     const panel = vscode.window.createWebviewPanel(
@@ -45,7 +43,6 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {}
 
-// ---------- Utilities ----------
 function escapeHtml(s?: string): string {
   if (!s) return '';
   return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' }[c] || c));
@@ -71,7 +68,6 @@ async function findGitRepoRoot(filePath: string): Promise<string | null> {
   return null;
 }
 
-// ---------- Git helpers ----------
 async function getFileCommits(filePath: string, repoPath: string) {
   const git = getGitPath();
   try {
@@ -98,7 +94,6 @@ async function getCommitFiles(commitHash: string, repoPath: string) {
   }
 }
 
-// ---------- LCS line-merge ----------
 function buildMergedLines(oldText: string, newText: string) {
   const a = oldText.length ? oldText.split('\n') : [];
   const b = newText.length ? newText.split('\n') : [];
@@ -123,7 +118,6 @@ function buildMergedLines(oldText: string, newText: string) {
   return merged;
 }
 
-// ---------- Build payload for webview ----------
 async function getFullFileDiffPayload(filePath: string, commit: string, repoPath: string) {
   const git = getGitPath();
   const rel = normalizeGitPath(path.relative(repoPath, filePath));
@@ -139,13 +133,29 @@ async function getFullFileDiffPayload(filePath: string, commit: string, repoPath
   const merged = buildMergedLines(oldContent, newContent);
   const types = merged.map(m => m.type === 'same' ? 'same' : m.type);
   const text = merged.map(m => m.text).join('\n');
-  return { text, types };
+
+  // group consecutive add/del lines into ranges
+  const markers: { start: number, end: number, type: 'add'|'del' }[] = [];
+  let current: { start: number, end: number, type: 'add'|'del' } | null = null;
+  for (let i = 0; i < types.length; i++) {
+    if (types[i] === 'add' || types[i] === 'del') {
+      if (current && current.type === types[i]) {
+        current.end = i;
+      } else {
+        if (current) markers.push(current);
+        current = { start: i, end: i, type: types[i] as 'add'|'del' };
+      }
+    } else {
+      if (current) { markers.push(current); current = null; }
+    }
+  }
+  if (current) markers.push(current);
+
+  return { text, types, markers };
 }
 
-// ---------- Webview HTML (client-side rendering fixes for block comments) ----------
 function getFileHistoryHtml(filePath: string, commits: any[], languageClass: string) {
   const commitJson = JSON.stringify(commits);
-  const escPath = escapeHtml(filePath);
   return `<!doctype html>
 <html>
 <head>
@@ -156,210 +166,158 @@ function getFileHistoryHtml(filePath: string, commits: any[], languageClass: str
 html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--vscode-font-family);}
 .container{display:flex;height:100vh;}
 .left{width:320px;background:var(--left);border-right:1px solid var(--border);overflow:auto;}
-.right{flex:1;overflow:auto;}
+.right{flex:1;position: relative;overflow:auto;}
 .commit{padding:10px;border-bottom:1px solid rgba(255,255,255,0.03);cursor:pointer;box-sizing:border-box;}
 .commit:hover{background:rgba(255,255,255,0.02);}
 .commit.selected{background:#094771;}
 .hash{color:#61aeee;font-family:monospace;cursor:pointer;}
 .date{color:#9fb3c8;margin-left:8px;}
-.msg{color:#ddd;margin-top:6px;line-height:1.25em; max-height:calc(1.25em * 3); overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; box-sizing:border-box;}
+.msg{color:#ddd;margin-top:6px;line-height:1.25em; max-height:calc(1.25em * 3); overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;}
+#diffWrapper{position:relative;height:100%;overflow:auto;}
 #diff{padding:12px 16px;}
-.line{display:block;width:100%;box-sizing:border-box;white-space:pre;font-family:var(--vscode-editor-font-family, monospace);font-size:13px;line-height:1.45;}
+.line{display:block;width:100%;white-space:pre;font-family:var(--vscode-editor-font-family, monospace);font-size:13px;line-height:1.45;}
 .add{background-color: rgba(64,160,64,0.10);}
 .del{background-color: rgba(160,64,64,0.11);}
+#scrollMarkers {
+  pointer-events: none;
+  position: absolute;
+  top: 0; right: 0;
+  width: 6px; height: 100%;
+}
+.marker {
+  position: absolute; left:0; width: 100%;
+  border-radius: 2px;
+}
+.marker.add{ background:#4CAF50;}
+.marker.del{ background:#F44336;}
 </style>
 </head>
 <body>
 <div class="container">
   <div class="left" id="leftPane"></div>
-  <div class="right"><div id="diff"><em style="padding:12px;display:block;color:#999;">Loading…</em></div></div>
+  <div class="right">
+    <div id="diffWrapper">
+      <div id="diff"><em style="padding:12px;display:block;color:#999;">Loading…</em></div>
+    </div>
+    <div id="scrollMarkers"></div>
+  </div>
 </div>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>
 const vscode = acquireVsCodeApi();
 const commits = ${commitJson};
 const left = document.getElementById('leftPane');
 
-// populate commits (left pane)
-commits.forEach(c => {
-  const el = document.createElement('div');
-  el.className = 'commit';
-  el.dataset.hash = c.hash;
-  el.innerHTML = '<div><span class="hash">'+escapeHtml(c.hash.substring(0,7))+'</span><span class="date">'+(c.date||'')+'</span></div>'
-               + '<div class="msg">'+escapeHtml(c.message||'')+'</div>';
-  el.addEventListener('click', () => {
+commits.forEach(c=>{
+  const el=document.createElement('div');
+  el.className='commit'; el.dataset.hash=c.hash;
+  el.innerHTML='<div><span class="hash">'+escapeHtml(c.hash.substring(0,7))+'</span><span class="date">'+(c.date||'')+'</span></div>'
+  +'<div class="msg">'+escapeHtml(c.message||'')+'</div>';
+  el.addEventListener('click',()=>{
     document.querySelectorAll('.commit').forEach(x=>x.classList.remove('selected'));
     el.classList.add('selected');
-    vscode.postMessage({ command: 'showDiff', commit: c.hash });
+    vscode.postMessage({command:'showDiff',commit:c.hash});
   });
-  el.querySelector('.hash').addEventListener('click', (ev) => {
+  el.querySelector('.hash').addEventListener('click',(ev)=>{
     ev.stopPropagation();
-    vscode.postMessage({ command: 'openCommitFiles', hash: c.hash });
+    vscode.postMessage({command:'openCommitFiles',hash:c.hash});
   });
   left.appendChild(el);
 });
 
-// ---- convert highlighted DOM into per-line HTML preserving nested tags ----
-function nodeToLines(node) {
-  // returns array of strings representing the node's content split into lines,
-  // with internal markup retained but without outer wrappers.
-  if (node.nodeType === Node.TEXT_NODE) {
-    const txt = node.nodeValue || '';
-    // split text node by newline
-    return txt.split('\\n');
-  } else if (node.nodeType === Node.ELEMENT_NODE) {
-    const tag = node.tagName.toLowerCase();
-    // build opening tag with attributes
-    let open = '<' + tag;
-    for (let a = 0; a < node.attributes.length; a++) {
-      const at = node.attributes[a];
-      open += ' ' + at.name + '="' + escapeAttr(at.value) + '"';
-    }
-    open += '>';
-    const close = '</' + tag + '>';
+function escapeHtml(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
-    // combine children lines
-    let lines = [''];
-    for (let c = 0; c < node.childNodes.length; c++) {
-      const child = node.childNodes[c];
-      const childLines = nodeToLines(child);
-      // append first child line to last line
-      lines[lines.length - 1] += (childLines[0] ?? '');
-      // push remaining child lines
-      for (let k = 1; k < childLines.length; k++) {
-        lines.push(childLines[k]);
-      }
-    }
-    // wrap each produced line with the element's tag
-    for (let i = 0; i < lines.length; i++) {
-      lines[i] = open + (lines[i].length ? lines[i] : '') + close;
-    }
+// highlight renderer (same as before) ...
+function nodeToLines(node){
+  if(node.nodeType===Node.TEXT_NODE){return (node.nodeValue||'').split('\\n');}
+  else if(node.nodeType===Node.ELEMENT_NODE){
+    const tag=node.tagName.toLowerCase();
+    let open='<'+tag; for(let a=0;a<node.attributes.length;a++){const at=node.attributes[a]; open+=' '+at.name+'="'+at.value+'"';} open+='>';
+    const close='</'+tag+'>';
+    let lines=[''];
+    for(let c=0;c<node.childNodes.length;c++){const child=node.childNodes[c];const cl=nodeToLines(child); lines[lines.length-1]+=(cl[0]||'');for(let k=1;k<cl.length;k++)lines.push(cl[k]);}
+    for(let i=0;i<lines.length;i++){lines[i]=open+(lines[i].length?lines[i]:'')+close;}
     return lines;
-  } else {
-    return [''];
-  }
+  } return [''];
 }
 
-function escapeAttr(s) {
-  return (s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function renderCombinedHighlighted(combinedText,types,lang){
+  const pre=document.createElement('pre');
+  const code=document.createElement('code');
+  code.className='hljs '+(lang||''); code.textContent=combinedText; pre.appendChild(code);
+  try{hljs.highlightElement(code);}catch{}
+  const container=document.createElement('div'); container.innerHTML=code.innerHTML;
+  let resultLines=[''];
+  for(let n=0;n<container.childNodes.length;n++){const nd=container.childNodes[n];const cl=nodeToLines(nd); resultLines[resultLines.length-1]+=(cl[0]||''); for(let li=1;li<cl.length;li++){resultLines.push(cl[li]);}}
+  if(resultLines.length>1 && resultLines[resultLines.length-1]==='') resultLines.pop();
+  const out=document.createElement('div');
+  for(let i=0;i<Math.max(resultLines.length,types.length);i++){const wrapper=document.createElement('div'); const t=types[i]||'same'; wrapper.className='line'+(t==='add'?' add':t==='del'?' del':''); wrapper.innerHTML=(resultLines[i]&&resultLines[i].length)?resultLines[i]:'&nbsp;'; out.appendChild(wrapper);}
+  return out;
 }
 
-// render combined highlighted html per-line and apply diff classes
-function renderCombinedHighlighted(combinedText, types, lang) {
-  // create a temporary code element to get highlighted HTML for the whole file
-  const pre = document.createElement('pre');
-  const code = document.createElement('code');
-  code.className = 'hljs ' + (lang || '');
-  code.textContent = combinedText; // set textContent so highlight.js parses raw text
-  pre.appendChild(code);
-
-  try { hljs.highlightElement(code); } catch (e) { try { hljs.highlightAll(); } catch(e2) {} }
-
-  // parse highlighted DOM (code.innerHTML) into DOM nodes and then convert into per-line safe HTML
-  const container = document.createElement('div');
-  container.innerHTML = code.innerHTML;
-
-  // accumulate lines by walking children
-  let resultLines = [''];
-  for (let n = 0; n < container.childNodes.length; n++) {
-    const node = container.childNodes[n];
-    const nodeLines = nodeToLines(node);
-    // append nodeLines into resultLines sequentially
-    resultLines[resultLines.length - 1] += (nodeLines[0] ?? '');
-    for (let li = 1; li < nodeLines.length; li++) {
-      resultLines.push(nodeLines[li]);
-    }
-  }
-
-  // trim possible last empty trailing line that came from final newline
-  if (resultLines.length > 1 && resultLines[resultLines.length - 1] === '') resultLines.pop();
-
-  // build fragment
-  const frag = document.createDocumentFragment();
-  const containerOut = document.createElement('div');
-  for (let i = 0; i < Math.max(resultLines.length, types.length); i++) {
-    const wrapper = document.createElement('div');
-    const t = types[i] || 'same';
-    wrapper.className = 'line' + (t === 'add' ? ' add' : t === 'del' ? ' del' : '');
-    wrapper.innerHTML = (resultLines[i] && resultLines[i].length) ? resultLines[i] : '&nbsp;';
-    containerOut.appendChild(wrapper);
-  }
-  return containerOut;
+// render tick ranges aligned with scrollbar
+function renderMarkers(ranges,totalLines,container){
+  container.innerHTML=''; if(!ranges||!ranges.length) return;
+  ranges.forEach(r=>{
+    const div=document.createElement('div');
+    div.className='marker '+r.type;
+    const startPct=(r.start/totalLines)*100;
+    const endPct=((r.end+1)/totalLines)*100;
+    div.style.top=startPct+'%';
+    div.style.height=(endPct-startPct)+'%';
+    container.appendChild(div);
+  });
 }
 
-// receive messages from extension
-window.addEventListener('message', event => {
-  const msg = event.data;
-  if (msg.command === 'updateDiff') {
-    const diffEl = document.getElementById('diff');
-    diffEl.innerHTML = '';
-    const frag = renderCombinedHighlighted(msg.text, msg.types || [], msg.language);
+window.addEventListener('message',event=>{
+  const msg=event.data;
+  if(msg.command==='updateDiff'){
+    const diffEl=document.getElementById('diff');
+    diffEl.innerHTML='';
+    const frag=renderCombinedHighlighted(msg.text,msg.types||[],msg.language);
     diffEl.appendChild(frag);
-    diffEl.scrollTop = 0;
+    diffEl.scrollTop=0;
+    const scrollMarkers=document.getElementById('scrollMarkers');
+    renderMarkers(msg.markers||[],msg.types.length,scrollMarkers);
   }
 });
 
-// request initial view (WORKING)
-vscode.postMessage({ command: 'showDiff', commit: 'WORKING' });
-
-function escapeHtml(s){ return (s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+vscode.postMessage({command:'showDiff',commit:'WORKING'});
 </script>
 </body>
 </html>`;
 }
 
-// ---------- Main flow: open panel, wire messages ----------
 async function openFileHistory(context: vscode.ExtensionContext, filePath: string) {
   const repoPath = await findGitRepoRoot(filePath);
   if (!repoPath) {
     vscode.window.showErrorMessage('Could not find git repository root for file.');
     return;
   }
-
-  const panel = vscode.window.createWebviewPanel(
-    'fastGitFileHistory',
-    `Git History — ${path.basename(filePath)}`,
-    vscode.ViewColumn.One,
-    { enableScripts: true, retainContextWhenHidden: true }
-  );
-
-  const commits = await getFileCommits(filePath, repoPath);
-  const languageClass = getHighlightJsLanguageClass(filePath);
-
-  panel.webview.html = getFileHistoryHtml(filePath, commits, languageClass);
-
-  panel.webview.onDidReceiveMessage(async (msg) => {
-    try {
-      if (msg.command === 'showDiff') {
-        const payload = await getFullFileDiffPayload(filePath, msg.commit, repoPath);
-        panel.webview.postMessage({ command: 'updateDiff', text: payload.text, types: payload.types, language: languageClass });
-      } else if (msg.command === 'openCommitFiles') {
-        const commitHash = msg.hash || msg.commit;
-        const files = await getCommitFiles(commitHash, repoPath);
-        const filesPanel = vscode.window.createWebviewPanel(
-          'fastGitCommitFiles',
-          `Commit ${commitHash.substring(0,7)} — files`,
-          vscode.ViewColumn.One,
-          { enableScripts: true }
-        );
-        filesPanel.webview.html = getCommitFilesHtml(files, commitHash);
-        filesPanel.webview.onDidReceiveMessage(inner => {
-          if (inner.command === 'openFileHistory') {
-            const absolute = path.join(repoPath, inner.file);
-            openFileHistory(context, absolute);
-          }
+  const panel=vscode.window.createWebviewPanel('fastGitFileHistory',`Git History — ${path.basename(filePath)}`,vscode.ViewColumn.One,{enableScripts:true,retainContextWhenHidden:true});
+  const commits=await getFileCommits(filePath,repoPath);
+  const languageClass=getHighlightJsLanguageClass(filePath);
+  panel.webview.html=getFileHistoryHtml(filePath,commits,languageClass);
+  panel.webview.onDidReceiveMessage(async (msg)=>{
+    try{
+      if(msg.command==='showDiff'){
+        const payload=await getFullFileDiffPayload(filePath,msg.commit,repoPath);
+        panel.webview.postMessage({command:'updateDiff', text:payload.text, types:payload.types, markers:payload.markers, language:languageClass});
+      } else if(msg.command==='openCommitFiles'){
+        const commitHash=msg.hash||msg.commit;
+        const files=await getCommitFiles(commitHash,repoPath);
+        const filesPanel=vscode.window.createWebviewPanel('fastGitCommitFiles',`Commit ${commitHash.substring(0,7)} — files`,vscode.ViewColumn.One,{enableScripts:true});
+        filesPanel.webview.html=getCommitFilesHtml(files,commitHash);
+        filesPanel.webview.onDidReceiveMessage(inner=>{
+          if(inner.command==='openFileHistory'){const absolute=path.join(repoPath,inner.file); openFileHistory(context,absolute);}
         });
       }
-    } catch (e: any) {
-      vscode.window.showErrorMessage('FastGitFileHistory error: ' + (e?.message ?? String(e)));
-      console.error(e);
-    }
+    }catch(e:any){vscode.window.showErrorMessage('FastGitFileHistory error: '+(e?.message??String(e)));console.error(e);}
   });
 }
 
-function getCommitFilesHtml(files: string[], commitHash: string) {
-  const items = files.map(f => `<div class="file" data-path="${escapeHtml(f)}">${escapeHtml(f)}</div>`).join('');
+function getCommitFilesHtml(files:string[],commitHash:string){
+  const items=files.map(f=>`<div class="file" data-path="${escapeHtml(f)}">${escapeHtml(f)}</div>`).join('');
   return `<!doctype html>
 <html><head><meta charset="utf-8"><style>
 body{background:#1e1e1e;color:#ddd;font-family:var(--vscode-font-family);padding:12px;}
@@ -369,20 +327,16 @@ body{background:#1e1e1e;color:#ddd;font-family:var(--vscode-font-family);padding
 <h3>Commit ${escapeHtml(commitHash.substring(0,7))}</h3>
 ${items}
 <script>
-const vscode = acquireVsCodeApi();
-document.querySelectorAll('.file').forEach(f=>f.addEventListener('click',()=> {
-  vscode.postMessage({ command: 'openFileHistory', file: f.dataset.path });
-}));
+const vscode=acquireVsCodeApi();
+document.querySelectorAll('.file').forEach(f=>f.addEventListener('click',()=>{vscode.postMessage({command:'openFileHistory',file:f.dataset.path});}));
 </script>
 </body></html>`;
 }
 
-function getHighlightJsLanguageClass(filePath: string) {
-  const ext = path.extname(filePath).toLowerCase();
-  const map: Record<string,string> = {
-    '.c':'cpp','.h':'cpp','.cpp':'cpp','.hpp':'cpp','.cc':'cpp','.hh':'cpp',
-    '.js':'javascript','.ts':'typescript','.json':'json','.py':'python','.java':'java',
-    '.cs':'cs','.go':'go','.rb':'ruby','.rs':'rust','.php':'php','.html':'xml','.css':'css'
-  };
-  return map[ext] || '';
+function getHighlightJsLanguageClass(filePath:string){
+  const ext=path.extname(filePath).toLowerCase();
+  const map:Record<string,string>={'.c':'cpp','.h':'cpp','.cpp':'cpp','.hpp':'cpp','.cc':'cpp','.hh':'cpp',
+  '.js':'javascript','.ts':'typescript','.json':'json','.py':'python','.java':'java',
+  '.cs':'cs','.go':'go','.rb':'ruby','.rs':'rust','.php':'php','.html':'xml','.css':'css'};
+  return map[ext]||'';
 }
