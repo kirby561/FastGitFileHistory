@@ -107,99 +107,42 @@ async function showFileHistory(panel: vscode.WebviewPanel, fileUri: vscode.Uri, 
     panel.webview.onDidReceiveMessage(async (message) => {
         try {
             if (message.command === 'showUncommittedDiff') {
-                await openUncommittedDiff(fileUri, cwd, gitPath);
+                const diff = await getUncommittedDiff(fileUri, cwd, gitPath);
+                panel.webview.postMessage({ command: 'updateDiff', diff });
             } else if (message.command === 'showCommitDiff') {
-                await openCommitVsParentDiff(fileUri, cwd, gitPath, message.hash);
-            } else if (message.command === 'showCommitDetails') {
-                await openCommitDetailsPanel(message.hash, cwd, gitPath, context, fileUri);
+                const diff = await getCommitVsParentDiff(fileUri, cwd, gitPath, message.hash);
+                panel.webview.postMessage({ command: 'updateDiff', diff });
             }
         } catch (err: any) {
             vscode.window.showErrorMessage(`FastGitFileHistory: ${err?.message ?? String(err)}`);
         }
     }, undefined, context.subscriptions);
+
+    // Auto-select the top entry and show diff immediately
+    const diff = await getUncommittedDiff(fileUri, cwd, gitPath);
+    panel.webview.postMessage({ command: 'updateDiff', diff });
 }
 
 // ---------------- Diff helpers ----------------
 
-async function openUncommittedDiff(fileUri: vscode.Uri, cwd: string, gitPath: string) {
+async function getUncommittedDiff(fileUri: vscode.Uri, cwd: string, gitPath: string): Promise<string> {
     const relPath = path.relative(cwd, fileUri.fsPath).replace(/\\/g, '/');
-    let headContents = '';
     try {
-        const res = await runGit(cwd, gitPath, ['show', `HEAD:${relPath}`]);
-        headContents = res.stdout;
-    } catch { }
-
-    const rightDoc = await vscode.workspace.openTextDocument(fileUri);
-    const leftDoc = await vscode.workspace.openTextDocument({ content: headContents, language: rightDoc.languageId });
-
-    await vscode.commands.executeCommand(
-        'vscode.diff',
-        leftDoc.uri,
-        rightDoc.uri,
-        `${path.basename(fileUri.fsPath)} — Uncommitted changes`,
-        { viewColumn: vscode.ViewColumn.Beside }
-    );
+        const res = await runGit(cwd, gitPath, ['diff', '--', relPath]);
+        return res.stdout || 'No uncommitted changes.';
+    } catch {
+        return 'No uncommitted changes.';
+    }
 }
 
-async function openCommitVsParentDiff(fileUri: vscode.Uri, cwd: string, gitPath: string, hash: string) {
+async function getCommitVsParentDiff(fileUri: vscode.Uri, cwd: string, gitPath: string, hash: string): Promise<string> {
     const relPath = path.relative(cwd, fileUri.fsPath).replace(/\\/g, '/');
-    let commitContents = '';
-    let parentContents = '';
-
     try {
-        const res = await runGit(cwd, gitPath, ['show', `${hash}:${relPath}`]);
-        commitContents = res.stdout;
-    } catch { }
-
-    try {
-        const res = await runGit(cwd, gitPath, ['show', `${hash}^:${relPath}`]);
-        parentContents = res.stdout;
-    } catch { }
-
-    const leftDoc = await vscode.workspace.openTextDocument({ content: parentContents });
-    const rightDoc = await vscode.workspace.openTextDocument({ content: commitContents });
-
-    await vscode.commands.executeCommand(
-        'vscode.diff',
-        leftDoc.uri,
-        rightDoc.uri,
-        `${path.basename(fileUri.fsPath)} — ${hash.substring(0, 7)}`,
-        { viewColumn: vscode.ViewColumn.Beside }
-    );
-}
-
-// ---------------- Commit details ----------------
-
-async function openCommitDetailsPanel(hash: string, cwd: string, gitPath: string, context: vscode.ExtensionContext, fileInContext?: vscode.Uri) {
-    const res = await runGit(cwd, gitPath, ['show', '--name-status', '--pretty=format:', hash]);
-    const files = res.stdout.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
-        const [status, ...rest] = l.split(/\s+/);
-        return { status, path: rest.join(' ') };
-    });
-
-    const panel = vscode.window.createWebviewPanel(
-        'fastGitFileCommitDetails',
-        `Commit ${hash.substring(0, 7)}`,
-        vscode.ViewColumn.Active,
-        { enableScripts: true }
-    );
-
-    panel.webview.html = getCommitDetailsHtml(hash, files);
-
-    panel.webview.onDidReceiveMessage(async (message) => {
-        if (message.command === 'openFile') {
-            const abs = path.resolve(cwd, message.file);
-            const uri = vscode.Uri.file(abs);
-            const newPanel = vscode.window.createWebviewPanel(
-                'fastGitFileHistory',
-                `Git History — ${path.basename(uri.fsPath)}`,
-                vscode.ViewColumn.One,
-                { enableScripts: true }
-            );
-            await showFileHistory(newPanel, uri, cwd, gitPath, context);
-            panel.dispose();
-        }
-    }, undefined, context.subscriptions);
+        const res = await runGit(cwd, gitPath, ['diff', `${hash}^`, hash, '--', relPath]);
+        return res.stdout || `No diff available for ${hash}`;
+    } catch {
+        return `No diff available for ${hash}`;
+    }
 }
 
 // ---------------- Webview HTML ----------------
@@ -216,9 +159,13 @@ function getWebviewContent(filename: string, commits: CommitInfo[], hasUncommitt
 body { margin:0; font-family: var(--vscode-font-family); }
 .container { display:flex; height:100vh; }
 .left { width:360px; border-right:1px solid var(--vscode-editorWidget-border); overflow:auto; }
+.right { flex:1; overflow:auto; padding:8px; white-space:pre; font-family:monospace; }
 .entry { padding:8px; border-bottom:1px solid rgba(128,128,128,0.2); cursor:pointer; }
 .entry:hover { background: var(--vscode-list-hoverBackground); }
 .hash { font-family: monospace; cursor:pointer; color: var(--vscode-textLink-foreground); }
+.add { background-color: rgba(0,128,0,0.15); }
+.del { background-color: rgba(255,0,0,0.15); }
+.selected { background: var(--vscode-list-activeSelectionBackground); }
 </style>
 </head>
 <body>
@@ -228,7 +175,7 @@ body { margin:0; font-family: var(--vscode-font-family); }
     <div id="topEntry" class="entry">Uncommitted changes ${hasUncommitted ? '(modified)' : '(no changes)'}</div>
     <ul id="commitList" style="list-style:none;padding:0;margin:0"></ul>
   </div>
-  <div style="flex:1;padding:8px;color:var(--vscode-descriptionForeground)">Select an entry to open a diff beside.</div>
+  <div class="right" id="diffView">Loading…</div>
 </div>
 <script>
 const vscode = acquireVsCodeApi();
@@ -236,10 +183,20 @@ const commits = ${commitJson};
 
 const list = document.getElementById('commitList');
 const topEntry = document.getElementById('topEntry');
+const diffView = document.getElementById('diffView');
+
+function clearSelection() {
+  document.querySelectorAll('.entry').forEach(e => e.classList.remove('selected'));
+}
 
 topEntry.addEventListener('click', () => {
+  clearSelection();
+  topEntry.classList.add('selected');
   vscode.postMessage({ command: 'showUncommittedDiff' });
 });
+
+// auto-select top entry
+topEntry.classList.add('selected');
 
 for (const c of commits) {
   const li = document.createElement('li');
@@ -248,41 +205,38 @@ for (const c of commits) {
     + '<div>' + escapeHtml(c.desc) + '</div>';
   li.addEventListener('click', (ev) => {
     if (ev.target.classList.contains('hash')) return;
+    clearSelection();
+    li.classList.add('selected');
     vscode.postMessage({ command: 'showCommitDiff', hash: c.hash });
   });
-  li.querySelector('.hash').addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    vscode.postMessage({ command: 'showCommitDetails', hash: c.hash });
-  });
   list.appendChild(li);
+}
+
+window.addEventListener('message', event => {
+  const msg = event.data;
+  if (msg.command === 'updateDiff') {
+    showDiff(msg.diff);
+  }
+});
+
+function showDiff(raw) {
+  const lines = raw.split('\\n');
+  diffView.innerHTML = '';
+  for (const line of lines) {
+    const div = document.createElement('div');
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      div.className = 'add';
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      div.className = 'del';
+    }
+    div.textContent = line;
+    diffView.appendChild(div);
+  }
 }
 
 function escapeHtml(s) {
   return s.replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-</script>
-</body>
-</html>`;
-}
-
-function getCommitDetailsHtml(hash: string, files: { status: string; path: string }[]) {
-    const rows = files.map(f =>
-        `<tr><td>${escapeHtml(f.status)}</td><td><a href="#" data-file="${escapeHtmlAttr(f.path)}">${escapeHtml(f.path)}</a></td></tr>`
-    ).join('');
-    return `<!doctype html>
-<html>
-<head><meta charset="utf-8"></head>
-<body>
-<h3>Commit ${hash.substring(0,7)}</h3>
-<table>${rows}</table>
-<script>
-const vscode = acquireVsCodeApi();
-document.querySelectorAll('a').forEach(a => {
-  a.addEventListener('click', e => {
-    e.preventDefault();
-    vscode.postMessage({ command: 'openFile', file: a.dataset.file });
-  });
-});
 </script>
 </body>
 </html>`;
@@ -301,8 +255,4 @@ function escapeHtml(s: string) {
             default: return c;
         }
     });
-}
-
-function escapeHtmlAttr(s: string) {
-    return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
