@@ -1,25 +1,21 @@
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
-import * as path from 'path';
 import * as util from 'util';
+import * as path from 'path';
 import * as fs from 'fs';
 
 const execFileAsync = util.promisify(execFile);
 let navigationHistory: (() => void)[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
-    const disposable = vscode.commands.registerCommand('fastGitFileHistory.view', async (uri?: vscode.Uri) => {
-        let fileUri = uri;
-        if (!fileUri && vscode.window.activeTextEditor) {
-            fileUri = vscode.window.activeTextEditor.document.uri;
-        }
+    context.subscriptions.push(vscode.commands.registerCommand('fastGitFileHistory.view', async (uri?: vscode.Uri) => {
+        let fileUri = uri || vscode.window.activeTextEditor?.document.uri;
         if (!fileUri) {
             vscode.window.showErrorMessage('No file selected.');
             return;
         }
         openFileHistory(context, fileUri.fsPath);
-    });
-    context.subscriptions.push(disposable);
+    }));
 
     context.subscriptions.push(vscode.commands.registerCommand('fastGitFileHistory.back', () => {
         const last = navigationHistory.pop();
@@ -34,19 +30,15 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.ViewColumn.One,
             { enableScripts: true }
         );
-
         panel.webview.html = getCommitFilesHtml(files, commitHash);
-        panel.webview.onDidReceiveMessage((msg) => {
+        panel.webview.onDidReceiveMessage(msg => {
             if (msg.command === 'openFileHistory' && context) {
                 navigationHistory.push(() => vscode.commands.executeCommand('fastGitFileHistory.openCommitFiles', commitHash, repoPath, context));
-                const absPath = path.join(repoPath, msg.filePath);
-                openFileHistory(context, absPath);
+                openFileHistory(context, path.join(repoPath, msg.filePath));
             }
         });
     }));
 }
-
-// ---------------- File History ----------------
 
 async function openFileHistory(context: vscode.ExtensionContext, filePath: string) {
     const repoPath = await findGitRepoRoot(filePath);
@@ -67,22 +59,20 @@ async function openFileHistory(context: vscode.ExtensionContext, filePath: strin
 
     panel.webview.html = getFileHistoryHtml(filePath, commits, languageClass);
 
-    panel.webview.onDidReceiveMessage(async (msg) => {
+    panel.webview.onDidReceiveMessage(async msg => {
         if (msg.command === 'showDiff') {
             const diffHtml = await getFullFileDiffHtml(filePath, msg.commit, repoPath);
-            panel.webview.postMessage({ command: 'updateDiff', diff: diffHtml, commit: msg.commit, language: languageClass });
+            panel.webview.postMessage({ command: 'updateDiff', diff: diffHtml, language: languageClass });
         } else if (msg.command === 'showCommitFiles') {
             navigationHistory.push(() => openFileHistory(context, filePath));
             vscode.commands.executeCommand('fastGitFileHistory.openCommitFiles', msg.commit, repoPath, context);
         }
     });
 
-    // Show the first commit or WORKING diff initially
-    const diffHtml = await getFullFileDiffHtml(filePath, commits[0].hash, repoPath);
-    panel.webview.postMessage({ command: 'updateDiff', diff: diffHtml, commit: commits[0].hash, language: languageClass });
+    // Initially show WORKING diff
+    const diffHtml = await getFullFileDiffHtml(filePath, 'WORKING', repoPath);
+    panel.webview.postMessage({ command: 'updateDiff', diff: diffHtml, language: languageClass });
 }
-
-// ---------------- Git Helpers ----------------
 
 async function findGitRepoRoot(filePath: string): Promise<string | null> {
     let dir = path.dirname(filePath);
@@ -125,61 +115,53 @@ async function getCommitFiles(commitHash: string, repoPath: string) {
 
 async function getFullFileDiffHtml(filePath: string, commit: string, repoPath: string) {
     const gitPath = vscode.workspace.getConfiguration('fastGitFileHistory').get<string>('gitPath') || 'git';
-    try {
-        const relativePath = path.relative(repoPath, filePath);
-        let baseContent = '';
-        let diffOutput = '';
+    const relativePath = path.relative(repoPath, filePath);
 
+    let oldContent = '';
+    let newContent = '';
+    try {
         if (commit === 'WORKING') {
-            baseContent = fs.readFileSync(filePath, 'utf-8');
+            newContent = fs.readFileSync(filePath, 'utf-8');
             try {
-                const { stdout } = await execFileAsync(gitPath, ['diff', '--', relativePath], { cwd: repoPath });
-                diffOutput = stdout;
+                const { stdout } = await execFileAsync(gitPath, ['show', `HEAD:${relativePath}`], { cwd: repoPath });
+                oldContent = stdout;
             } catch {}
         } else {
             try {
-                const { stdout } = await execFileAsync(gitPath, ['show', `${commit}:${relativePath}`], { cwd: repoPath });
-                baseContent = stdout;
-            } catch {
-                baseContent = '';
-            }
-
+                const { stdout } = await execFileAsync(gitPath, ['show', `${commit}^:${relativePath}`], { cwd: repoPath });
+                oldContent = stdout;
+            } catch {}
             try {
-                const { stdout } = await execFileAsync(gitPath, ['diff', '-U0', `${commit}^`, commit, '--', relativePath], { cwd: repoPath });
-                diffOutput = stdout;
-            } catch {
-                // First commit: treat all lines as additions
-                diffOutput = baseContent.split('\n').map(l => '+' + l).join('\n');
-            }
+                const { stdout } = await execFileAsync(gitPath, ['show', `${commit}:${relativePath}`], { cwd: repoPath });
+                newContent = stdout;
+            } catch {}
         }
-
-        const addedLines = new Set<number>();
-        const removedLines = new Set<number>();
-        let currLine = 0;
-        for (const line of diffOutput.split('\n')) {
-            if (line.startsWith('@@')) {
-                const match = /@@ -\d+,?\d* \+(\d+),?\d* @@/.exec(line);
-                if (match) currLine = parseInt(match[1], 10) - 1;
-            } else if (line.startsWith('+') && !line.startsWith('+++')) {
-                addedLines.add(currLine);
-                currLine++;
-            } else if (line.startsWith('-') && !line.startsWith('---')) {
-                removedLines.add(currLine);
-            } else {
-                currLine++;
-            }
-        }
-
-        const html = baseContent.split('\n').map((l, i) => {
-            if (addedLines.has(i)) return `<span class="add">${escapeHtml(l)}</span>`;
-            if (removedLines.has(i)) return `<span class="del">${escapeHtml(l)}</span>`;
-            return escapeHtml(l);
-        }).join('\n');
-
-        return html;
     } catch {
         return '// Unable to load file/diff';
     }
+
+    // Compute inline diff line by line
+    const oldLines = oldContent.split('\n');
+    const newLines = newContent.split('\n');
+    const maxLines = Math.max(oldLines.length, newLines.length);
+    let htmlLines: string[] = [];
+
+    for (let i = 0; i < maxLines; i++) {
+        const oldLine = oldLines[i] ?? '';
+        const newLine = newLines[i] ?? '';
+        if (!oldLine && newLine) {
+            htmlLines.push(`<span class="add">${escapeHtml(newLine)}</span>`);
+        } else if (oldLine && !newLine) {
+            htmlLines.push(`<span class="del">${escapeHtml(oldLine)}</span>`);
+        } else if (oldLine !== newLine) {
+            htmlLines.push(`<span class="del">${escapeHtml(oldLine)}</span>`);
+            htmlLines.push(`<span class="add">${escapeHtml(newLine)}</span>`);
+        } else {
+            htmlLines.push(escapeHtml(newLine));
+        }
+    }
+
+    return htmlLines.join('\n');
 }
 
 // ---------------- HTML ----------------
