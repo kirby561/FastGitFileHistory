@@ -13,56 +13,43 @@
   "contributes": {
     "commands": [
       {
-        "command": "FastGitFileHistory.viewHistory",
+        "command": "fastGitFileHistory.view",
         "title": "View File Git History",
-        "category": "FastGitFileHistory"
-      },
-      {
-        "command": "FastGitFileHistory.openCommitFiles",
-        "title": "Show Changed Files in Commit",
-        "category": "FastGitFileHistory"
+        "category": "Git"
       }
     ],
     "menus": {
       "explorer/context": [
         {
-          "command": "FastGitFileHistory.viewHistory",
-          "when": "resourceExtname != '' && !explorerResourceIsFolder",
-          "group": "navigation@99"
-        }
-      ],
-      "editor/title": [
-        {
-          "command": "FastGitFileHistory.viewHistory",
+          "command": "fastGitFileHistory.view",
           "when": "resourceLangId != ''",
-          "group": "navigation@99"
+          "group": "navigation"
         }
       ],
       "editor/context": [
         {
-          "command": "FastGitFileHistory.viewHistory",
-          "when": "resourceFilename =~ /.+/",
-          "group": "navigation@99"
+          "command": "fastGitFileHistory.view",
+          "when": "editorLangId != ''",
+          "group": "navigation"
         }
       ]
     },
     "configuration": {
-      "title": "FastGitFileHistory",
+      "type": "object",
+      "title": "Fast Git File History",
       "properties": {
-        "FastGitFileHistory.gitPath": {
+        "fastGitFileHistory.gitPath": {
           "type": "string",
-          "default": "",
-          "description": "Path to the git executable to use. Leave empty to use the first git found in %PATH%."
+          "default": "git",
+          "description": "Path to the git executable to use. Defaults to 'git' (first found in PATH)."
         }
       }
     }
   },
-  "activationEvents": [
-    "onFileSystem:FILE"
-  ],
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./"
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
     "@types/vscode": "^1.102.0",
