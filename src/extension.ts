@@ -6,35 +6,53 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 const execFileAsync = util.promisify(execFile);
+let navigationHistory: (() => void)[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
-  context.subscriptions.push(
-    vscode.commands.registerCommand('fastGitFileHistory.view', async (uri?: vscode.Uri) => {
-      const fileUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-      if (!fileUri) {
-        vscode.window.showErrorMessage('No file selected.');
-        return;
+  context.subscriptions.push(vscode.commands.registerCommand('fastGitFileHistory.view', async (uri?: vscode.Uri) => {
+    const fileUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+    if (!fileUri) {
+      vscode.window.showErrorMessage('No file selected.');
+      return;
+    }
+    await openFileHistory(context, fileUri.fsPath);
+  }));
+
+  // optional back command if you used it earlier
+  context.subscriptions.push(vscode.commands.registerCommand('fastGitFileHistory.back', () => {
+    const last = navigationHistory.pop();
+    if (last) last();
+  }));
+
+  // command used to open commit files view (from webview)
+  context.subscriptions.push(vscode.commands.registerCommand('fastGitFileHistory.openCommitFiles', async (commitHash: string, repoPath: string, context?: vscode.ExtensionContext) => {
+    const files = await getCommitFiles(commitHash, repoPath);
+    const panel = vscode.window.createWebviewPanel(
+      'fastGitFileHistoryCommitFiles',
+      `Commit ${commitHash.substring(0,7)}`,
+      vscode.ViewColumn.One,
+      { enableScripts: true }
+    );
+    panel.webview.html = getCommitFilesHtml(files, commitHash);
+    panel.webview.onDidReceiveMessage(msg => {
+      if (msg.command === 'openFileHistory' && context) {
+        navigationHistory.push(() => vscode.commands.executeCommand('fastGitFileHistory.openCommitFiles', commitHash, repoPath, context));
+        openFileHistory(context, path.join(repoPath, msg.filePath));
       }
-      await openFileHistory(context, fileUri.fsPath);
-    })
-  );
+    });
+  }));
 }
 
 export function deactivate() {}
 
 // ---------- Utilities ----------
+function escapeHtml(s?: string): string {
+  if (!s) return '';
+  return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' }[c] || c));
+}
 
-function escapeHtml(input?: string): string {
-  if (!input) return '';
-  return input.replace(/[&<>"]/g, (c) => {
-    switch (c) {
-      case '&': return '&amp;';
-      case '<': return '&lt;';
-      case '>': return '&gt;';
-      case '"': return '&quot;';
-      default: return c;
-    }
-  });
+function normalizeGitPath(p: string) {
+  return p.replace(/\\/g, '/');
 }
 
 function getGitPath(): string {
@@ -42,28 +60,24 @@ function getGitPath(): string {
   return cfg.get<string>('gitPath') || 'git';
 }
 
-function normalizeGitPath(p: string) {
-  return p.replace(/\\/g, '/');
-}
-
 async function findGitRepoRoot(filePath: string): Promise<string | null> {
   let dir = path.dirname(filePath);
-  while (dir && dir !== path.dirname(dir)) {
+  while (dir) {
     if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    dir = path.dirname(dir);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
   return null;
 }
 
-// ---------- Git operations ----------
-
+// ---------- Git helpers ----------
 async function getFileCommits(filePath: string, repoPath: string) {
   const git = getGitPath();
-  const rel = normalizeGitPath(path.relative(repoPath, filePath));
   try {
+    const rel = normalizeGitPath(path.relative(repoPath, filePath));
     const { stdout } = await execFileAsync(git, ['log', '--pretty=format:%H|%ad|%s', '--date=short', '--', rel], { cwd: repoPath });
-    const lines = stdout.split('\n').filter(Boolean);
-    const commits = lines.map(line => {
+    const commits = stdout.split('\n').filter(Boolean).map(line => {
       const [hash, date, ...rest] = line.split('|');
       return { hash, date, message: rest.join('|') };
     });
@@ -84,45 +98,32 @@ async function getCommitFiles(commitHash: string, repoPath: string) {
   }
 }
 
-// ---------- LCS-based merge for line alignment ----------
-
+// ---------- LCS line-merge ----------
 function buildMergedLines(oldText: string, newText: string) {
-  const oldLines = oldText ? oldText.split('\n') : [];
-  const newLines = newText ? newText.split('\n') : [];
-  const m = oldLines.length;
-  const n = newLines.length;
+  const a = oldText.length ? oldText.split('\n') : [];
+  const b = newText.length ? newText.split('\n') : [];
+  const m = a.length;
+  const n = b.length;
   const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = m - 1; i >= 0; i--) {
     for (let j = n - 1; j >= 0; j--) {
-      if (oldLines[i] === newLines[j]) dp[i][j] = 1 + dp[i + 1][j + 1];
+      if (a[i] === b[j]) dp[i][j] = 1 + dp[i + 1][j + 1];
       else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
     }
   }
   let i = 0, j = 0;
-  const merged: { type: 'same' | 'del' | 'add'; text: string }[] = [];
+  const merged: { type: 'same'|'del'|'add', text: string }[] = [];
   while (i < m && j < n) {
-    if (oldLines[i] === newLines[j]) {
-      merged.push({ type: 'same', text: newLines[j] });
-      i++; j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      merged.push({ type: 'del', text: oldLines[i] });
-      i++;
-    } else {
-      merged.push({ type: 'add', text: newLines[j] });
-      j++;
-    }
+    if (a[i] === b[j]) { merged.push({ type: 'same', text: b[j] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { merged.push({ type: 'del', text: a[i] }); i++; }
+    else { merged.push({ type: 'add', text: b[j] }); j++; }
   }
-  while (i < m) {
-    merged.push({ type: 'del', text: oldLines[i++] });
-  }
-  while (j < n) {
-    merged.push({ type: 'add', text: newLines[j++] });
-  }
+  while (i < m) { merged.push({ type: 'del', text: a[i++] }); }
+  while (j < n) { merged.push({ type: 'add', text: b[j++] }); }
   return merged;
 }
 
-// ---------- Build payload for webview: combined text + types ----------
-
+// ---------- Build payload for webview ----------
 async function getFullFileDiffPayload(filePath: string, commit: string, repoPath: string) {
   const git = getGitPath();
   const rel = normalizeGitPath(path.relative(repoPath, filePath));
@@ -136,17 +137,15 @@ async function getFullFileDiffPayload(filePath: string, commit: string, repoPath
     try { const { stdout } = await execFileAsync(git, ['show', `${commit}:${rel}`], { cwd: repoPath }); newContent = stdout || ''; } catch { newContent = ''; }
   }
   const merged = buildMergedLines(oldContent, newContent);
-  const types = merged.map(m => m.type);
+  const types = merged.map(m => m.type === 'same' ? 'same' : m.type);
   const text = merged.map(m => m.text).join('\n');
   return { text, types };
 }
 
-// ---------- Webview HTML ----------
-
+// ---------- Webview HTML (client-side rendering fixes for block comments) ----------
 function getFileHistoryHtml(filePath: string, commits: any[], languageClass: string) {
-  const commitsJson = JSON.stringify(commits);
-  const escFile = escapeHtml(filePath);
-  // Left header removed per request; commits list will be stacked without the top file name
+  const commitJson = JSON.stringify(commits);
+  const escPath = escapeHtml(filePath);
   return `<!doctype html>
 <html>
 <head>
@@ -179,9 +178,10 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-famil
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>
 const vscode = acquireVsCodeApi();
-const commits = ${commitsJson};
+const commits = ${commitJson};
 const left = document.getElementById('leftPane');
 
+// populate commits (left pane)
 commits.forEach(c => {
   const el = document.createElement('div');
   el.className = 'commit';
@@ -200,105 +200,95 @@ commits.forEach(c => {
   left.appendChild(el);
 });
 
-// Convert highlighted HTML (which may contain tags spanning multiple lines) into line-safe pieces
-function splitHighlightedHtmlToLines(highlightedHtml) {
-  // Put highlighted HTML into a container and walk nodes to distribute into lines,
-  // ensuring tags are properly opened/closed on each produced line.
-  const container = document.createElement('div');
-  container.innerHTML = highlightedHtml;
+// ---- convert highlighted DOM into per-line HTML preserving nested tags ----
+function nodeToLines(node) {
+  // returns array of strings representing the node's content split into lines,
+  // with internal markup retained but without outer wrappers.
+  if (node.nodeType === Node.TEXT_NODE) {
+    const txt = node.nodeValue || '';
+    // split text node by newline
+    return txt.split('\\n');
+  } else if (node.nodeType === Node.ELEMENT_NODE) {
+    const tag = node.tagName.toLowerCase();
+    // build opening tag with attributes
+    let open = '<' + tag;
+    for (let a = 0; a < node.attributes.length; a++) {
+      const at = node.attributes[a];
+      open += ' ' + at.name + '="' + escapeAttr(at.value) + '"';
+    }
+    open += '>';
+    const close = '</' + tag + '>';
 
-  const lines = [''];
-
-  function appendToLine(idx, str) {
-    while (lines.length <= idx) lines.push('');
-    lines[idx] += str;
+    // combine children lines
+    let lines = [''];
+    for (let c = 0; c < node.childNodes.length; c++) {
+      const child = node.childNodes[c];
+      const childLines = nodeToLines(child);
+      // append first child line to last line
+      lines[lines.length - 1] += (childLines[0] ?? '');
+      // push remaining child lines
+      for (let k = 1; k < childLines.length; k++) {
+        lines.push(childLines[k]);
+      }
+    }
+    // wrap each produced line with the element's tag
+    for (let i = 0; i < lines.length; i++) {
+      lines[i] = open + (lines[i].length ? lines[i] : '') + close;
+    }
+    return lines;
+  } else {
+    return [''];
   }
+}
 
-  function walk(node, lineIndex) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const parts = node.nodeValue.split('\\n');
-      for (let i = 0; i < parts.length; i++) {
-        appendToLine(lineIndex, escapeHtmlTextNode(parts[i]));
-        if (i < parts.length - 1) {
-          lineIndex++;
-        }
-      }
-      return lineIndex;
-    } else if (node.nodeType === Node.ELEMENT_NODE) {
-      const tag = node.tagName.toLowerCase();
-      // build opening with attributes
-      let open = '<' + tag;
-      for (let a=0;a<node.attributes.length;a++){
-        const at = node.attributes[a];
-        open += ' ' + at.name + '="' + escapeAttr(at.value) + '"';
-      }
-      open += '>';
-      const close = '</' + tag + '>';
+function escapeAttr(s) {
+  return (s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
-      const startIndex = lineIndex;
-      // add opening to startIndex
-      appendToLine(lineIndex, open);
+// render combined highlighted html per-line and apply diff classes
+function renderCombinedHighlighted(combinedText, types, lang) {
+  // create a temporary code element to get highlighted HTML for the whole file
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.className = 'hljs ' + (lang || '');
+  code.textContent = combinedText; // set textContent so highlight.js parses raw text
+  pre.appendChild(code);
 
-      // process children
-      for (let c = 0; c < node.childNodes.length; c++) {
-        lineIndex = walk(node.childNodes[c], lineIndex);
-      }
+  try { hljs.highlightElement(code); } catch (e) { try { hljs.highlightAll(); } catch(e2) {} }
 
-      // ensure close tag appended to every line that had something inside this element
-      for (let idx = startIndex; idx <= lineIndex; idx++) {
-        appendToLine(idx, close);
-      }
-      return lineIndex;
-    } else {
-      return lineIndex;
+  // parse highlighted DOM (code.innerHTML) into DOM nodes and then convert into per-line safe HTML
+  const container = document.createElement('div');
+  container.innerHTML = code.innerHTML;
+
+  // accumulate lines by walking children
+  let resultLines = [''];
+  for (let n = 0; n < container.childNodes.length; n++) {
+    const node = container.childNodes[n];
+    const nodeLines = nodeToLines(node);
+    // append nodeLines into resultLines sequentially
+    resultLines[resultLines.length - 1] += (nodeLines[0] ?? '');
+    for (let li = 1; li < nodeLines.length; li++) {
+      resultLines.push(nodeLines[li]);
     }
   }
 
-  // helper to escape any stray '<' '>' in text nodes (should not usually be needed)
-  function escapeHtmlTextNode(s) {
-    return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-  }
-  function escapeAttr(s) {
-    return s.replace(/"/g, '&quot;').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
+  // trim possible last empty trailing line that came from final newline
+  if (resultLines.length > 1 && resultLines[resultLines.length - 1] === '') resultLines.pop();
 
-  for (let n = 0; n < container.childNodes.length; n++) {
-    walk(container.childNodes[n], 0);
-  }
-
-  // trim trailing empty line if the last line is empty due to final newline handling
-  if (lines.length > 1 && lines[lines.length-1] === '') lines.pop();
-  return lines;
-}
-
-// Build final DOM fragment from highlighted combined text and types
-function renderCombinedHighlighted(combinedText, types, lang) {
-  // highlight the combined text using highlight.js
-  const tempPre = document.createElement('pre');
-  const code = document.createElement('code');
-  code.className = 'hljs ' + (lang || '');
-  code.textContent = combinedText;
-  tempPre.appendChild(code);
-
-  try { hljs.highlightElement(code); } catch(e) { try { hljs.highlightAll(); } catch(e2) {} }
-
-  // Now code.innerHTML contains highlighted HTML; split into per-line safe HTML
-  const highlightedHtml = code.innerHTML;
-  const hlLines = splitHighlightedHtmlToLines(highlightedHtml);
-
-  // build fragment with per-line wrappers, applying add/del classes (types array aligns with lines)
+  // build fragment
   const frag = document.createDocumentFragment();
-  const lineCount = Math.max(hlLines.length, types.length);
-  for (let i = 0; i < lineCount; i++) {
+  const containerOut = document.createElement('div');
+  for (let i = 0; i < Math.max(resultLines.length, types.length); i++) {
     const wrapper = document.createElement('div');
     const t = types[i] || 'same';
     wrapper.className = 'line' + (t === 'add' ? ' add' : t === 'del' ? ' del' : '');
-    wrapper.innerHTML = (hlLines[i] && hlLines[i].length) ? hlLines[i] : '&nbsp;';
-    frag.appendChild(wrapper);
+    wrapper.innerHTML = (resultLines[i] && resultLines[i].length) ? resultLines[i] : '&nbsp;';
+    containerOut.appendChild(wrapper);
   }
-  return frag;
+  return containerOut;
 }
 
+// receive messages from extension
 window.addEventListener('message', event => {
   const msg = event.data;
   if (msg.command === 'updateDiff') {
@@ -310,20 +300,16 @@ window.addEventListener('message', event => {
   }
 });
 
-// request initial working diff
+// request initial view (WORKING)
 vscode.postMessage({ command: 'showDiff', commit: 'WORKING' });
 
-function escapeHtml(s) {
-  return (s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
+function escapeHtml(s){ return (s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 </script>
 </body>
-</html>
-`;
+</html>`;
 }
 
 // ---------- Main flow: open panel, wire messages ----------
-
 async function openFileHistory(context: vscode.ExtensionContext, filePath: string) {
   const repoPath = await findGitRepoRoot(filePath);
   if (!repoPath) {
@@ -357,7 +343,7 @@ async function openFileHistory(context: vscode.ExtensionContext, filePath: strin
           vscode.ViewColumn.One,
           { enableScripts: true }
         );
-        filesPanel.webview.html = getCommitFilesHtml(commitHash, files);
+        filesPanel.webview.html = getCommitFilesHtml(files, commitHash);
         filesPanel.webview.onDidReceiveMessage(inner => {
           if (inner.command === 'openFileHistory') {
             const absolute = path.join(repoPath, inner.file);
@@ -372,7 +358,7 @@ async function openFileHistory(context: vscode.ExtensionContext, filePath: strin
   });
 }
 
-function getCommitFilesHtml(commitHash: string, files: string[]) {
+function getCommitFilesHtml(files: string[], commitHash: string) {
   const items = files.map(f => `<div class="file" data-path="${escapeHtml(f)}">${escapeHtml(f)}</div>`).join('');
   return `<!doctype html>
 <html><head><meta charset="utf-8"><style>
@@ -390,8 +376,6 @@ document.querySelectorAll('.file').forEach(f=>f.addEventListener('click',()=> {
 </script>
 </body></html>`;
 }
-
-// ---------- small utility ----------
 
 function getHighlightJsLanguageClass(filePath: string) {
   const ext = path.extname(filePath).toLowerCase();
